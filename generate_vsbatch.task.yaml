@@ -175,7 +175,7 @@ steps:
 
         # Build find-relationships command
         find_cmd=(
-            python3 "${TASK_DIR}/utils/vspipeline_utilities.py"
+            python3 "${TASK_DIR}/vspipeline_utilities.py"
             find-relationships
             --samples sample_metadata.tsv
             --output related_samples.csv
@@ -204,7 +204,7 @@ steps:
 
         # Build the Python command with all JSON files
         python_cmd=(
-            python3 "${TASK_DIR}/utils/vspipeline_utilities.py"
+            python3 "${TASK_DIR}/vspipeline_utilities.py"
             generate-vsbatch
         )
         
