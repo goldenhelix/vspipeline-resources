@@ -1,0 +1,118 @@
+name: Run VarSeq Reports
+description: Run reports (VSPGx, STR, or both) for a VarSeq project
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 8
+  memory_gb: 16
+
+parameters:
+  - name: vsbatch_file
+    label: VSBatch File
+    type: file
+    pattern_match:
+      - '*.vsbatch'
+    supports_location_mode: 'read_only'
+    help: "The VSBatch file from which to extract the project name. User must provide either this or the project path."
+    optional: true
+
+  - name: project_path
+    label: Project Path
+    type: file
+    path: AppData/Projects
+    pattern_match:
+      - '*.vsproject'
+    help: "The path of the VarSeq project to run the report for. User must provide either this or the VSBatch file."
+    optional: true
+
+  - name: run_vspgx_report
+    label: Run VSPGx Report
+    type: boolean
+    value: "true"
+    help: "If enabled, the VSPGx report will be run."
+
+  - name: run_str_report
+    label: Run STR Report
+    type: boolean
+    value: "true"
+    help: "If enabled, the STR report will be run."
+
+steps:
+  - name: run_vspgx_report
+    description: Run the VSPGx report for a VarSeq project
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Set up workspace
+
+        cd /scratch
+        
+        export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
+        if [ -d "$WORKSPACE_DIR/AppData/VarSeq/User Data" ]; then
+          export GH_CRASH_DUMP_DIR="$WORKSPACE_DIR/AppData/VarSeq/User Data"
+        fi
+        if [ -d "/scratch" ]; then
+          export GH_TEMPDIR="/scratch"
+        fi
+
+        # Determine the project path: use project_path parameter if provided, otherwise extract from VSBatch file.
+        if [ -n "$vsbatch_file" ]; then
+          # Extract full project path from VSBatch file
+          abs_project_path=$(grep -oP 'project_create\s+"\K[^"]+' "$vsbatch_file" | head -n1)
+          abs_project_path=${WORKSPACE_DIR}/${abs_project_path}
+          if [ -z "$abs_project_path" ]; then
+            echo "Error: Project path not found in VSBatch file: $vsbatch_file"
+            exit 1
+          fi
+          # Check that the project directory exists
+          if [ ! -d "$abs_project_path" ]; then
+            echo "Error: Project directory does not exist: $abs_project_path"
+            exit 1
+          fi
+        elif [ -n "$project_path" ]; then
+          # Use provided project_path (with possible expansion)
+          if [[ "$project_path" = /* ]]; then
+            abs_project_path="$project_path"
+          else
+            abs_project_path="${GOLDENHELIX_USERDATA}/Projects/${project_path}"
+          fi
+          # Check that the project file exists
+          if [ ! -f "$abs_project_path" ]; then
+            echo "Error: Project file does not exist: $abs_project_path"
+            exit 1
+          fi
+        else
+          echo "Error: Must provide either project_path or vsbatch_file."
+          exit 1
+        fi
+        
+        project_name="$(basename "$abs_project_path")"
+        echo "Project path: $abs_project_path"
+
+        # Run the VSPGx report
+
+        if [ "$run_vspgx_report" == "true" ]; then
+          echo "Running VSPGx report for project: $project_name"
+          /opt/vspipeline/vspipeline -c project_open "$abs_project_path" \
+            -c run_project_report "PGX_Report_Template" true true \
+            -c task_wait \
+            -c project_close || { echo "VSPGx report failed"; exit 1; }
+          echo "VSPGx report completed successfully"
+        fi
+
+        # Run the STR report
+
+        if [ "$run_str_report" == "true" ]; then
+          echo "Running STR report for project: $project_name"
+          /opt/vspipeline/vspipeline -c project_open "$abs_project_path" \
+            -c foreach_sample "table_recordset_add_current STRs TR" \
+            -c foreach_sample "table_recordset_add_current SmallVariants VA" \
+            -c run_project_report "STR_Report_Template" true true '[{ "name":"Variant Record Set", "value": "VA" }, { "name":"Str Record Set", "value": "TR" }]' \
+            -c task_wait \
+            -c project_close || { echo "STR report failed"; exit 1; }
+          echo "STR report completed successfully"
+        fi

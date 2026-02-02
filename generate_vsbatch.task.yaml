@@ -1,0 +1,261 @@
+name: Generate VSBatch File
+description: Generate VSBatch files for each set of related samplesbased on the output of the PacBio WDL Somatic Workflow
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 4
+  memory_gb: 8
+
+parameters:
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'read_only'
+    help: "The input folder for the resulting alignment files, VCFs, and (optional) metrics files."
+
+  - name: vsproject_template
+    label: VarSeq Project Template
+    type: file
+    supports_location_mode: 'read_only'
+    help: "The template to use for the VarSeq project."
+    path: AppData/VarSeq/User Data/ProjectTemplates/
+
+  - name: overwrite_project
+    label: Overwrite Existing VarSeq Projects 
+    type: boolean
+    value: "true"
+    help: "If enabled, existing VarSeq projects with the same name will be overwritten."
+
+  - name: cohort
+    label: Cohort Mode
+    type: boolean
+    value: "false"
+    help: "If enabled, put all samples into a single cohort group instead of finding relationships between them."
+
+steps:
+  - name: generate_vsbatch_files
+    description: Generate VSBatch files for each set of related samples
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail  
+
+        # Implementation notes:
+        # - Uses per-sample, per-task vspipeline_inputs.json files to determine samples and file paths
+        # - Finds all *_vspipeline_inputs.json files and merges them
+        # - Queries sample catalog for tumor/normal relationships
+        # - Groups related samples and generates VSBatch files
+        # - Supports multiverse, CNV, breakend, and region file imports based on template capabilities
+
+        echo "*************************"
+        echo "Starting Generate VSBatch File Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - input_folder: $input_folder"
+        echo "  - vsproject_template: $vsproject_template"
+        echo "  - overwrite_project: $overwrite_project"
+        echo "  - cohort: $cohort"
+        echo "*************************"
+
+        #############################
+        # Set up environment
+        #############################
+
+        cd /scratch
+
+        # Record start time
+        GENERATE_VSBATCH_START_TIME=$(date +%s)
+
+        #############################
+        # Find and merge vspipeline_inputs.json files
+        #############################
+
+        # Look for all per-sample, per-task vspipeline_inputs.json files in the input folder
+        echo "Searching for *_vspipeline_inputs.json files in $input_folder..."
+
+        # Find all JSON files matching the pattern
+        vspipeline_inputs_files=$(find "$input_folder" -maxdepth 1 -name "*_vspipeline_inputs.json" -type f | sort)
+        
+        if [ -z "$vspipeline_inputs_files" ]; then
+            echo "Error: No *_vspipeline_inputs.json files found in $input_folder"
+            exit 1
+        fi
+
+        # Count files found
+        file_count=$(echo "$vspipeline_inputs_files" | wc -l)
+        echo "Found $file_count vspipeline_inputs.json file(s):"
+        echo "$vspipeline_inputs_files" | while read -r file; do
+            echo "  • $(basename "$file")"
+        done
+
+        # Extract sample names from all JSON files
+        echo "Extracting sample names from all vspipeline_inputs.json files..."
+
+        # Collect all unique sample names from all JSON files
+        sample_names=$(echo "$vspipeline_inputs_files" | xargs -I {} sh -c 'jq -r ".samples | keys[]" "{}" 2>/dev/null' | sort -u)
+
+        echo "Found samples:"
+        echo "$sample_names" | while read -r sample; do
+            echo "• $sample"
+        done
+
+        # For each sample, query its metadata from sample catalog
+
+        echo "Querying sample catalog for samples..."
+
+        # Create output TSV file with headers
+        echo -e "sample\ttumor\tnormal_sample\tmother\tfather" > sample_metadata.tsv
+
+        for sample_name in $sample_names; do
+            echo "Querying sample catalog for sample: $sample_name..."
+            echo "Running query Sample:eq:$sample_name"
+
+            # Query tumor status
+            tumor=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" \
+                --fields="Tumor" \
+                --output=tsv 2>/dev/null | tail -n 1 | tr -d '\r\n\t ')
+
+            # Query normal sample
+            normal_sample=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" \
+                --fields="NormalSample" \
+                --output=tsv 2>/dev/null | tail -n 1 | tr -d '\r\n\t ')
+
+            # Query mother
+            mother=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" \
+                --fields="Mother" \
+                --output=tsv 2>/dev/null | tail -n 1 | tr -d '\r\n\t ')
+
+            # Query father
+            father=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" \
+                --fields="Father" \
+                --output=tsv 2>/dev/null | tail -n 1 | tr -d '\r\n\t ')
+
+            # Check if any data was found
+            if [[ -z "$tumor" && -z "$normal_sample" && -z "$mother" && -z "$father" ]]; then
+                echo "Sample $sample_name not found in catalog as primary entry"
+                echo "Checking if this sample appears as a matched normal for any tumor samples..."
+                
+                # Query if this sample appears as NormalSample for any other tumor samples
+                tumor_samples=$(gautil client catalog-export SampleCatalog NormalSample:eq:"$sample_name" \
+                    --fields="Sample" \
+                    --output=tsv 2>/dev/null | tail -n +2)
+                
+                if [[ -n "$tumor_samples" ]]; then
+                    echo "Found $sample_name as matched normal for tumor sample(s):"
+                    while IFS= read -r tumor_sample; do
+                        tumor_sample=$(echo "$tumor_sample" | tr -d '\r\n\t ')
+                        if [[ -n "$tumor_sample" ]]; then
+                            echo "  • $tumor_sample"
+                        fi
+                    done <<< "$tumor_samples"
+                    # Add entry for this sample with empty fields
+                    # The Python grouping logic will connect it to the tumor samples via the
+                    # tumor samples' metadata (where this sample appears as NormalSample)
+                    echo -e "$sample_name\t\t\t\t" >> sample_metadata.tsv
+                else
+                    echo "Sample $sample_name not found in catalog at all"
+                    continue
+                fi
+            else
+                # Append results to TSV
+                echo -e "$sample_name\t$tumor\t$normal_sample\t$mother\t$father" >> sample_metadata.tsv
+            fi
+            
+            # Print results to console for logging
+            echo "Results for sample $sample_name:"
+            echo "• Tumor: $tumor"
+            echo "• Normal sample: $normal_sample"
+            echo "• Mother: $mother"
+            echo "• Father: $father"
+            
+        done
+
+        echo "Sample metadata saved to sample_metadata.tsv"
+        echo "Finding related samples..."
+
+        # Build find-relationships command
+        find_cmd=(
+            python3 "${TASK_DIR}/utils/vspipeline_utilities.py"
+            find-relationships
+            --samples sample_metadata.tsv
+            --output related_samples.csv
+        )
+        
+        # Add --cohort flag if needed
+        if [ "$cohort" == "true" ]; then
+            find_cmd+=(--cohort)
+        fi
+        
+        # Execute the command
+        "${find_cmd[@]}"
+
+        #############################
+        # For each set of related samples, generate a VSBatch file
+        #############################
+
+        # Build command with all JSON files as arguments
+        # Store files in an array to properly handle spaces in paths
+        json_files_array=()
+        while IFS= read -r file; do
+            if [ -n "$file" ]; then
+                json_files_array+=("$file")
+            fi
+        done <<< "$vspipeline_inputs_files"
+
+        # Build the Python command with all JSON files
+        python_cmd=(
+            python3 "${TASK_DIR}/utils/vspipeline_utilities.py"
+            generate-vsbatch
+        )
+        
+        # Add template, samples, and all JSON files
+        python_cmd+=(--template "$vsproject_template")
+        python_cmd+=(--samples "related_samples.csv")
+        python_cmd+=(--sample_files "${json_files_array[@]}")
+        python_cmd+=(--overwrite_project "$overwrite_project")
+        python_cmd+=(--scratch_dir "/scratch")
+
+        echo "Executing Python command: ${python_cmd[@]}"
+
+        # Execute the command
+        "${python_cmd[@]}" 
+
+        echo "VSBatch files generated for all related samples"
+
+        #############################
+        # Copy VSBatch files to input folder
+        #############################
+
+        echo "Copying VSBatch files to input folder..."
+        cp -r ./*.vsbatch "$input_folder"
+
+        echo "VSBatch files copied to input folder"
+
+        # Record end time and calculate duration
+        GENERATE_VSBATCH_END_TIME=$(date +%s)
+        GENERATE_VSBATCH_DURATION=$((GENERATE_VSBATCH_END_TIME - GENERATE_VSBATCH_START_TIME))
+        GENERATE_VSBATCH_DURATION_HOUR=$((GENERATE_VSBATCH_DURATION / 3600))
+        GENERATE_VSBATCH_DURATION_MIN=$(((GENERATE_VSBATCH_DURATION % 3600) / 60))
+        GENERATE_VSBATCH_DURATION_SEC=$((GENERATE_VSBATCH_DURATION % 60))
+
+        # List generated VSBatch files
+        vsbatch_files=$(find "$input_folder" -maxdepth 1 -name "*.vsbatch" -type f | sort)
+        vsbatch_count=$(echo "$vsbatch_files" | wc -l)
+
+        echo "================================================"
+        echo "✅ GENERATE VSBATCH FILE TASK COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${GENERATE_VSBATCH_DURATION_HOUR}h ${GENERATE_VSBATCH_DURATION_MIN}m ${GENERATE_VSBATCH_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - Generated $vsbatch_count VSBatch file(s):"
+        echo "$vsbatch_files" | while read -r file; do
+            if [ -n "$file" ]; then
+                file_size=$(ls -lh "$file" | awk '{print $5}')
+                echo "    • $(basename "$file") ($file_size)"
+            fi
+        done
+        echo "================================================"
+        echo ""
+        echo "*************************"
+        echo "Generate VSBatch File Task completed successfully"
+        echo "*************************"
