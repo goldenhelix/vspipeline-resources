@@ -1,0 +1,27 @@
+name: Update Sample Catalog from Text Manifest
+description: Updates the sample catalog from a text manifest file.
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 1
+  memory_gb: 1
+
+parameters:
+  - name: manifest_file
+    label: Manifest File
+    type: file
+    supports_location_mode: 'read_only'
+    pattern_match:
+      - "*.txt"
+      - "*.tsv"
+      - "*.csv"
+
+steps:
+  - name: update_sample_catalog
+    description: Updates the sample catalog from a text manifest file.
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        python3 "${TASK_DIR}/process_manifest.py" "$manifest_file"

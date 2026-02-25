@@ -1,0 +1,168 @@
+name: VSPipeline Create Project
+description: Create a vspipeline project from a folder of input VCF.gz files
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 4
+  memory_gb: 12
+
+alternative_agent_requirements:
+  Panels:
+    cpu_cores: 4
+    memory_gb: 12
+    description: Small number of VCFs for gene panels
+  Exomes:
+    cpu_cores: 8
+    memory_gb: 16
+    description: Medium number of VCFs for exomes, shallow genomes or large panels
+  Genomes:
+    cpu_cores: 16
+    memory_gb: 32
+    description: Large number of VCFs for high coverage genomes
+
+parameters:
+  - name: base_path
+    label: Input Folder
+    help: The input folder of vcf.gz files to analyze
+    type: directory
+    supports_location_mode: 'read_only'
+
+  - name: project_directory
+    label: Project Directory
+    help: The directory where the VarSeq project will be created
+    type: directory
+    supports_location_mode: 'read_write'
+    value: AppData/Projects
+
+  - name: project_name
+    label: Project Name
+    help: The name of the VarSeq project to create. If left blank, the name of the input folder will be used.
+    type: string
+    optional: true
+
+  - name: project_template
+    label: VarSeq Project Template
+    type: file
+    persist_key: 'vspipeline.project_template'
+    path: AppData/VarSeq/User Data/ProjectTemplates/
+
+  - name: overwrite_project
+    label: Overwrite Existing VarSeq Projects
+    help: Select to overwrite existing VarSeq projects
+    type: boolean
+    value: true
+
+steps:
+  - name: vspipeline
+    description: Run vspipeline
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -euo pipefail
+
+        export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
+        if [ -d "$WORKSPACE_DIR/AppData/VarSeq/User Data" ]; then
+          export GH_CRASH_DUMP_DIR="$WORKSPACE_DIR/AppData/VarSeq/User Data"
+        fi
+        if [ -d "/scratch" ]; then
+          export GH_TEMPDIR="/scratch"
+        fi
+
+        if [ ! -f "$project_template" ]; then
+          echo "Error: Project template file '$project_template' does not exist."
+          exit 1
+        fi
+
+        if ! grep -q "\"genome\": \"$GH_WORKSPACE_ASSEMBLY\"" "$project_template"; then
+          echo "Error: Project template does not match the current workspace assembly: $GH_WORKSPACE_ASSEMBLY"
+          exit 1
+        fi
+
+        # Create project directory if it doesn't exist
+        mkdir -p ${project_directory}
+
+        # If project_name is not provided, use the base directory name
+        if [[ -z "${project_name}" ]]; then
+          project_name=$(basename "${base_path}")
+        fi
+
+        # Check if project already exists and overwrite is disabled
+        if [[ -d "${project_directory}/${project_name}" && "${overwrite_project}" == "false" ]]; then
+          echo "ERROR: Project directory already exists and overwrite is set to false"
+          exit 1
+        fi
+
+        cd "${base_path}"
+        variant_files=$(find . -name "*.vcf.gz" -type f | paste -sd ',' - | sed 's/\([^,]*\)/\1/g')
+
+        if [[ -z "${variant_files}" ]]; then
+          echo "ERROR: No VCF files found in the specified directory: ${base_path}"
+          exit 1
+        fi
+
+        # Count VCF files
+        vcf_count=$(find . -name "*.vcf.gz" -type f | wc -l)
+
+        echo "================================================"
+        echo "🚀 STARTING VARSEQ PROJECT CREATION"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Configuration:"
+        echo "  - Input Folder: $base_path"
+        echo "  - VCF Files Found: $vcf_count"
+        echo "📤 Output Configuration:"
+        echo "  - Project Directory: $project_directory"
+        echo "  - Project Name: $project_name"
+        echo "  - Project Template: $(basename "$project_template")"
+        echo "  - Overwrite Existing: $overwrite_project"
+        echo "⚙️  Configuration:"
+        echo "  - Workspace Assembly: $GH_WORKSPACE_ASSEMBLY"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+        echo "================================================"
+
+        VSPIPELINE_START_TIME=$(date +%s)
+
+        # Write the commands to create-project.vs-batch using a heredoc
+        cat <<EOF > "${project_directory}/${project_name}.vs-batch"
+        get_version
+        project_create "${project_directory}/${project_name}" "$project_template" ${overwrite_project:+overwrite=true}
+        import files="${variant_files}" append_files_with_same_samples=True sample_fields_catalog=SampleCatalog
+        download_required_sources
+        task_wait
+        get_task_list
+        project_close
+        EOF
+
+        /opt/vspipeline/vspipeline \
+            -c batch file="${project_directory}/${project_name}.vs-batch"
+
+        rm -f "${project_directory}/${project_name}.vs-batch"
+
+        # Post-execution logging
+        VSPIPELINE_END_TIME=$(date +%s)
+        VSPIPELINE_DURATION=$((VSPIPELINE_END_TIME - VSPIPELINE_START_TIME))
+        VSPIPELINE_DURATION_HOUR=$((VSPIPELINE_DURATION / 3600))
+        VSPIPELINE_DURATION_MIN=$(((VSPIPELINE_DURATION % 3600) / 60))
+        VSPIPELINE_DURATION_SEC=$((VSPIPELINE_DURATION % 60))
+
+        # Calculate project size if it exists
+        project_path="${project_directory}/${project_name}"
+        if [ -d "$project_path" ]; then
+          PROJECT_SIZE=$(du -sb "$project_path" 2>/dev/null | cut -f1 || echo "0")
+          PROJECT_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $PROJECT_SIZE / 1073741824}")
+        else
+          PROJECT_SIZE_GB="Unknown"
+        fi
+
+        echo "================================================"
+        echo "✅ VARSEQ PROJECT CREATION COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${VSPIPELINE_DURATION_HOUR}h ${VSPIPELINE_DURATION_MIN}m ${VSPIPELINE_DURATION_SEC}s"
+        echo "📁 Output:"
+        echo "  - Project Location: ${project_directory}/${project_name}"
+        echo "  - Project Size: ${PROJECT_SIZE_GB} GB"
+        echo "  - VCF Files Imported: $vcf_count"
+        echo "================================================"

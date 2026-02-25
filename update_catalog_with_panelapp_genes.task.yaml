@@ -1,0 +1,28 @@
+name: Update Sample Catalog with PanelApp AUS Genes
+description: Updates the sample catalog with PanelApp panel name and gene list for a given sample.
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 1
+  memory_gb: 1
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    help: "The sample name to update in the catalog"
+
+  - name: panel_name
+    label: Panel Name
+    type: string
+    help: "Example: Achromatopsia"
+
+steps:
+  - name: update_sample_catalog
+    description: Updates the sample catalog with panel name and gene list from PanelApp AUS API.
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        python3 "${TASK_DIR}/update_catalog_with_panelapp_aus_genes.py" "$sample_name" "$panel_name"
