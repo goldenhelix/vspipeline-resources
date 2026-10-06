@@ -43,7 +43,7 @@ steps:
         # Record start time
         VSPIPELINE_START_TIME=$(date +%s)
 
-        cd ${WORKSPACE_DIR}
+        cd "${WORKSPACE_DIR}"
         
         # Summarize VSBatch file contents
         echo ""

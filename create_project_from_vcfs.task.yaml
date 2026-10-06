@@ -81,7 +81,7 @@ steps:
         fi
 
         # Create project directory if it doesn't exist
-        mkdir -p ${project_directory}
+        mkdir -p "${project_directory}"
 
         # If project_name is not provided, use the base directory name
         if [[ -z "${project_name}" ]]; then
