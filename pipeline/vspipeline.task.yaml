@@ -5,7 +5,6 @@ auto_generate_session_for_account: "{workspaceBot}"
 agent_requirements:
   cpu_cores: 16
   memory_gb: 32
-  runtime_limit_seconds: 3600
 
 parameters:
   - name: vsbatch_file
