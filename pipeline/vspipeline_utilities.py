@@ -376,6 +376,7 @@ def _generate_vsbatch_content(template_file: str,
     
     # Add standard export and project management commands
     vsbatch_lines.extend([
+        'run_saved_exports',
         'get_task_list',
         'project_save',
         'project_close'

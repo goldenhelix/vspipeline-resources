@@ -132,6 +132,7 @@ steps:
         import files="${variant_files}" append_files_with_same_samples=True sample_fields_catalog=SampleCatalog
         download_required_sources
         task_wait
+        run_saved_exports
         get_task_list
         project_close
         EOF
